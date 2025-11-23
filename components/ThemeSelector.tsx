@@ -1,3 +1,4 @@
+
 import React, { useState, useMemo } from 'react';
 import { DifficultyLevel, LearningSession } from '../types';
 
@@ -68,10 +69,13 @@ export const ThemeSelector: React.FC<ThemeSelectorProps> = ({
 
   return (
     <div className="flex flex-col items-center justify-center py-12 px-4">
-      <div className="w-full max-w-4xl space-y-10 text-center">
+      <div className="w-full max-w-4xl space-y-8 text-center">
         <div>
-          <h2 className="text-4xl font-extrabold text-gray-900 mb-2">Vocabulary Builder</h2>
-          <p className="text-gray-500 text-lg mb-4">Select your proficiency level and a topic, or create your own list.</p>
+          {/* Prominent Slogan */}
+          <h2 className="text-4xl md:text-5xl font-extrabold text-transparent bg-clip-text bg-gradient-to-r from-primary to-secondary mb-4 tracking-tight py-2">
+              From words to real-world English
+          </h2>
+          <p className="text-gray-500 text-lg mb-6">Select your proficiency level and a topic, or create your own list.</p>
           
           <div className="flex justify-center gap-3">
             <button 
@@ -90,6 +94,10 @@ export const ThemeSelector: React.FC<ThemeSelectorProps> = ({
         </div>
 
         <div className="space-y-8 bg-white p-8 rounded-3xl border border-gray-100 shadow-xl">
+             <div className="text-left mb-2">
+                <h3 className="text-xl font-bold text-gray-800">Vocabulary Builder</h3>
+             </div>
+
             {/* Difficulty Selector */}
             <div className="space-y-4">
                 <div>
