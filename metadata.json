@@ -1,0 +1,7 @@
+{
+  "name": "RealUse English - From words to real-world English",
+  "description": "An immersive English learning application focusing on real-world usage. Features vocabulary drills, sentence construction with AI feedback, and article comprehension with English-first explanations.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
