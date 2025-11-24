@@ -1,4 +1,3 @@
-
 import React, { useState, useRef, useEffect } from 'react';
 import { Header } from './components/Header';
 import { ThemeSelector } from './components/ThemeSelector';
@@ -6,11 +5,14 @@ import { WordLearning } from './components/WordLearning';
 import { ArticleView } from './components/ArticleView';
 import { FreeWriting } from './components/FreeWriting';
 import { Notebook } from './components/Notebook';
-import { AppStage, WordData, ArticleData, DifficultyLevel, LearningSession } from './types';
+import { MistakeNotebook } from './components/MistakeNotebook';
+import { Auth } from './components/Auth';
+import { AppStage, WordData, ArticleData, DifficultyLevel, LearningSession, User, MistakeItem } from './types';
 import { generateVocabulary, generateArticle, generateWordDetails } from './services/geminiService';
+import { authService, dataService } from './services/storageService';
 
 function App() {
-  const [stage, setStage] = useState<AppStage>(AppStage.THEME_SELECTION);
+  const [stage, setStage] = useState<AppStage>(AppStage.AUTH);
   const [theme, setTheme] = useState('');
   const [difficulty, setDifficulty] = useState<DifficultyLevel>('B2');
   const [words, setWords] = useState<WordData[]>([]);
@@ -22,6 +24,10 @@ function App() {
   const [customWordInput, setCustomWordInput] = useState('');
   
   const [learningHistory, setLearningHistory] = useState<LearningSession[]>([]);
+  const [mistakes, setMistakes] = useState<MistakeItem[]>([]);
+
+  // Auth State
+  const [currentUser, setCurrentUser] = useState<User | null>(null);
 
   // Points State
   const [points, setPoints] = useState(0);
@@ -31,17 +37,51 @@ function App() {
   // Ref for scrolling to the bottom of the list when adding words
   const bottomRef = useRef<HTMLDivElement>(null);
 
-  // Load history on mount
+  // Initialization: Check for logged in user
   useEffect(() => {
-    const stored = localStorage.getItem('linguaFlow_history');
-    if (stored) {
-        try {
-            setLearningHistory(JSON.parse(stored));
-        } catch (e) {
-            console.error("Failed to parse history", e);
-        }
+    const user = authService.getCurrentUser();
+    if (user) {
+      setCurrentUser(user);
+      loadUserData(user.username);
+      setStage(AppStage.THEME_SELECTION);
+    } else {
+      setStage(AppStage.AUTH);
     }
   }, []);
+
+  const loadUserData = (username: string) => {
+    const history = dataService.getHistory(username);
+    setLearningHistory(history);
+    
+    const userMistakes = dataService.getMistakes(username);
+    setMistakes(userMistakes);
+    
+    const savedPoints = dataService.getPoints(username);
+    setPoints(savedPoints);
+
+    // Populate known words to avoid duplication in generation
+    const knownWords = new Set<string>();
+    history.forEach(h => h.words.forEach(w => knownWords.add(w.word.toLowerCase())));
+    setHistoryWords(knownWords);
+  };
+
+  const handleLogin = () => {
+    const user = authService.getCurrentUser();
+    if (user) {
+      setCurrentUser(user);
+      loadUserData(user.username);
+      setStage(AppStage.THEME_SELECTION);
+    }
+  };
+
+  const handleLogout = () => {
+    authService.logout();
+    setCurrentUser(null);
+    setLearningHistory([]);
+    setMistakes([]);
+    setPoints(0);
+    setStage(AppStage.AUTH);
+  };
 
   // Trigger article generation when entering the stage
   useEffect(() => {
@@ -70,7 +110,7 @@ function App() {
   }, [stage, article, theme, words]);
 
   const saveSessionToHistory = (newTheme: string, newWords: WordData[], newDifficulty: string) => {
-      if (newWords.length === 0) return;
+      if (newWords.length === 0 || !currentUser) return;
       
       const newSession: LearningSession = {
           id: Date.now().toString(),
@@ -82,25 +122,28 @@ function App() {
 
       const updatedHistory = [newSession, ...learningHistory];
       setLearningHistory(updatedHistory);
-      localStorage.setItem('linguaFlow_history', JSON.stringify(updatedHistory));
+      dataService.saveHistory(currentUser.username, updatedHistory);
+  };
+
+  const handleRecordMistake = (mistake: MistakeItem) => {
+      if (!currentUser) return;
+      const updatedMistakes = dataService.addMistake(currentUser.username, mistake);
+      setMistakes(updatedMistakes);
   };
 
   const handleThemeSelect = async (selectedTheme: string, selectedDifficulty: DifficultyLevel) => {
     setTheme(selectedTheme);
     setDifficulty(selectedDifficulty);
     setIsLoading(true);
-    // Reset history for new theme
-    const newHistory = new Set<string>();
-    setLearningList([]);
+    setLearningList([]); // Reset current build list
     
-    // Reset points for new session
-    setPoints(0);
+    // Do NOT reset points here. Accumulate session points into total.
     
     try {
-      const generatedWords = await generateVocabulary(selectedTheme, selectedDifficulty, []);
+      // Generate new words, excluding history
+      const excludeList = Array.from(historyWords) as string[];
+      const generatedWords = await generateVocabulary(selectedTheme, selectedDifficulty, excludeList);
       
-      generatedWords.forEach(w => newHistory.add(w.word.toLowerCase()));
-      setHistoryWords(newHistory);
       setWords(generatedWords);
       setStage(AppStage.VOCAB_PREVIEW);
     } catch (error) {
@@ -113,7 +156,7 @@ function App() {
 
   const handleStartCustomSession = async (inputString: string) => {
     setIsLoading(true);
-    setPoints(0); // Reset points
+    // Do NOT reset points here.
 
     const wordList = inputString.split(/[,\s\n\t\u3000\uFF0C\u3001\u2013\u2014-]+/)
         .map(w => w.trim())
@@ -135,7 +178,6 @@ function App() {
         
         setWords(results);
         setLearningList([]); // Reset learning list so user interacts only with the grid
-        setHistoryWords(new Set(results.map(w => w.word.toLowerCase())));
         setStage(AppStage.VOCAB_PREVIEW);
     } catch (error) {
         console.error("Error creating custom session:", error);
@@ -150,11 +192,6 @@ function App() {
       try {
           const excludeList = Array.from(historyWords) as string[];
           const generatedWords = await generateVocabulary(theme, difficulty, excludeList);
-          
-          // Add new words to history
-          const updatedHistory = new Set(historyWords);
-          generatedWords.forEach(w => updatedHistory.add(w.word.toLowerCase()));
-          setHistoryWords(updatedHistory);
           
           setWords(generatedWords);
           
@@ -189,7 +226,7 @@ function App() {
                 .map(w => w.trim())
                 .filter(w => w.length > 0);
 
-           const distinctWords = [...new Set(wordList)];
+           const distinctWords = [...new Set(wordList)] as string[];
            
            if (distinctWords.length === 0) return;
 
@@ -197,11 +234,6 @@ function App() {
            const results = await Promise.all(promises);
 
            setWords(prev => [...prev, ...results]);
-           setHistoryWords(prev => {
-               const next = new Set(prev);
-               results.forEach(r => next.add(r.word.toLowerCase()));
-               return next;
-           });
            setCustomWordInput('');
       } catch (error) {
           console.error("Error adding custom word:", error);
@@ -232,6 +264,12 @@ function App() {
     setWords(finalWords); 
     // Save to history
     saveSessionToHistory(theme || "Custom Session", finalWords, difficulty);
+    
+    // Update history set immediately for current session usage
+    const newSet = new Set(historyWords);
+    finalWords.forEach(w => newSet.add(w.word.toLowerCase()));
+    setHistoryWords(newSet);
+
     setStage(AppStage.WORD_LEARNING);
   };
 
@@ -255,27 +293,14 @@ function App() {
           setIsLoading(true);
           setArticle(null); // Clear previous article
           setWords([]); // Clear grid while loading
-
-          // Reset points for next session? The prompt implies "enter next theme" after score shows.
-          // Usually "Continue Theme" keeps score, but prompt said "Finish theme show score then enter next".
-          // I will reset points to keep the "Finish" feeling distinct.
-          setPoints(0); 
+          // Do NOT reset points here.
 
           const next = async () => {
              try {
-                // Update exclusion list with all currently known words
-                const excludeSet = new Set(historyWords);
-                words.forEach(w => excludeSet.add(w.word.toLowerCase()));
-                setHistoryWords(excludeSet);
-
+                const excludeList = Array.from(historyWords) as string[];
                 // Generate new words
-                const generatedWords = await generateVocabulary(theme, difficulty, Array.from(excludeSet));
+                const generatedWords = await generateVocabulary(theme, difficulty, excludeList);
                 
-                // Add newly generated words to history
-                const finalHistory = new Set(excludeSet);
-                generatedWords.forEach(w => finalHistory.add(w.word.toLowerCase()));
-                setHistoryWords(finalHistory);
-
                 setWords(generatedWords);
                 setStage(AppStage.VOCAB_PREVIEW);
                 window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -291,19 +316,13 @@ function App() {
   };
 
   const handleReset = () => {
-     // Trigger celebration only if coming from a completed state? 
-     // If clicking header reset during selection, no celebration.
-     // If clicking "Start New Topic" in FreeWriting, celebration first.
-     
-     // Direct reset:
      setStage(AppStage.THEME_SELECTION);
      setTheme('');
      setWords([]);
      setLearningList([]);
-     setHistoryWords(new Set());
      setArticle(null);
      setIsLoading(false);
-     setPoints(0);
+     // Do NOT reset points here.
   };
 
   const handleFinishSession = () => {
@@ -326,13 +345,17 @@ function App() {
       setStage(AppStage.NOTEBOOK);
   };
 
+  const handleOpenMistakes = () => {
+      setStage(AppStage.MISTAKE_NOTEBOOK);
+  };
+
   const handleLoadSession = (session: LearningSession) => {
       setTheme(session.theme);
       setWords(session.words);
       setLearningList([]); // Reset learning list so edits to 'words' are respected
       setDifficulty(session.difficulty as DifficultyLevel);
       setStage(AppStage.VOCAB_PREVIEW);
-      setPoints(0);
+      // Do NOT reset points here.
   };
 
   const handlePracticeReview = (selectedWords: WordData[]) => {
@@ -344,12 +367,27 @@ function App() {
   };
   
   const handleAddPoints = (amount: number) => {
-      setPoints(prev => prev + amount);
+      if (!currentUser) return;
+      
+      setPoints(prev => {
+          const newPoints = prev + amount;
+          dataService.savePoints(currentUser.username, newPoints);
+          return newPoints;
+      });
   };
+
+  if (stage === AppStage.AUTH) {
+      return <Auth onLogin={handleLogin} />;
+  }
 
   return (
     <div className="min-h-screen bg-[#F3F4F6] text-gray-800 font-sans relative">
-      <Header onReset={handleReset} points={points} />
+      <Header 
+        onReset={handleReset} 
+        points={points} 
+        user={currentUser} 
+        onLogout={handleLogout} 
+      />
       
       {/* Celebration Overlay */}
       {showCelebration && (
@@ -404,6 +442,7 @@ function App() {
             history={learningHistory}
             onLoadSession={handleLoadSession}
             onOpenNotebook={handleOpenNotebook}
+            onOpenMistakes={handleOpenMistakes}
             isLoading={isLoading} 
           />
         )}
@@ -413,6 +452,13 @@ function App() {
                 history={learningHistory} 
                 onLoadSession={handleLoadSession} 
                 onBack={handleReset} 
+            />
+        )}
+
+        {stage === AppStage.MISTAKE_NOTEBOOK && (
+            <MistakeNotebook 
+                mistakes={mistakes}
+                onBack={handleReset}
             />
         )}
 
@@ -555,6 +601,7 @@ function App() {
                 onComplete={handleWordsComplete} 
                 theme={theme} 
                 onAddPoints={handleAddPoints}
+                onRecordMistake={handleRecordMistake}
            />
         )}
 

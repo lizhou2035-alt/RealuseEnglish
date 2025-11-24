@@ -1,15 +1,18 @@
 
 import React from 'react';
+import { User } from '../types';
 
 interface HeaderProps {
   onReset: () => void;
   points: number;
+  user?: User | null;
+  onLogout?: () => void;
 }
 
-export const Header: React.FC<HeaderProps> = ({ onReset, points }) => {
+export const Header: React.FC<HeaderProps> = ({ onReset, points, user, onLogout }) => {
   return (
-    <header className="bg-surface shadow-sm">
-      <div className="max-w-5xl mx-auto px-4 py-4 flex justify-between items-center">
+    <header className="bg-surface shadow-sm sticky top-0 z-50">
+      <div className="max-w-5xl mx-auto px-4 py-3 flex justify-between items-center">
         <div className="flex items-center space-x-3 cursor-pointer" onClick={onReset}>
            {/* Custom Green Globe Logo */}
            <div className="w-10 h-10 relative">
@@ -33,13 +36,33 @@ export const Header: React.FC<HeaderProps> = ({ onReset, points }) => {
                </svg>
            </div>
           <div className="flex flex-col">
-            <h1 className="text-2xl font-bold text-gray-800 tracking-tight leading-none">RealUse English</h1>
-            {/* Slogan moved to home page, simplified header text */}
+            <h1 className="text-xl md:text-2xl font-bold text-gray-800 tracking-tight leading-none">RealUse English</h1>
           </div>
         </div>
-        <div className="flex items-center space-x-2 bg-yellow-50 px-3 py-1.5 rounded-full border border-yellow-200">
-          <span className="text-xl">⭐</span>
-          <span className="font-bold text-yellow-700">{points} Points</span>
+        
+        <div className="flex items-center gap-3">
+            <div className="flex items-center space-x-2 bg-yellow-50 px-3 py-1.5 rounded-full border border-yellow-200">
+                <span className="text-lg">⭐</span>
+                <span className="font-bold text-yellow-700 text-sm md:text-base">{points}</span>
+            </div>
+            
+            {user && (
+                <div className="flex items-center gap-2 pl-2 border-l border-gray-200">
+                    <div className="text-right hidden sm:block">
+                        <div className="text-xs text-gray-400 font-bold uppercase">Logged in as</div>
+                        <div className="text-sm font-bold text-gray-800">{user.username}</div>
+                    </div>
+                    <button 
+                        onClick={onLogout}
+                        className="p-2 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-full transition-colors"
+                        title="Logout"
+                    >
+                        <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
+                        </svg>
+                    </button>
+                </div>
+            )}
         </div>
       </div>
     </header>

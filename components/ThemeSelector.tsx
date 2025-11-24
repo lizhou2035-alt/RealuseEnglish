@@ -8,6 +8,7 @@ interface ThemeSelectorProps {
   history: LearningSession[];
   onLoadSession: (session: LearningSession) => void;
   onOpenNotebook: () => void;
+  onOpenMistakes: () => void;
   isLoading: boolean;
 }
 
@@ -39,6 +40,7 @@ export const ThemeSelector: React.FC<ThemeSelectorProps> = ({
   history,
   onLoadSession,
   onOpenNotebook,
+  onOpenMistakes,
   isLoading 
 }) => {
   const [input, setInput] = useState('');
@@ -77,12 +79,18 @@ export const ThemeSelector: React.FC<ThemeSelectorProps> = ({
           </h2>
           <p className="text-gray-500 text-lg mb-6">Select your proficiency level and a topic, or create your own list.</p>
           
-          <div className="flex justify-center gap-3">
+          <div className="flex justify-center gap-3 flex-wrap">
             <button 
                 onClick={onOpenNotebook}
                 className="inline-flex items-center gap-2 px-4 py-2 bg-white border border-gray-200 rounded-full text-sm font-medium text-gray-600 hover:border-primary hover:text-primary transition-colors shadow-sm"
             >
                 <span>📓</span> My Notebook ({uniqueWordsCount})
+            </button>
+             <button 
+                onClick={onOpenMistakes}
+                className="inline-flex items-center gap-2 px-4 py-2 bg-white border border-gray-200 rounded-full text-sm font-medium text-gray-600 hover:border-red-500 hover:text-red-500 transition-colors shadow-sm"
+            >
+                <span>⚠️</span> Mistakes
             </button>
             <button 
                 onClick={onOpenNotebook}

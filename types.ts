@@ -1,4 +1,6 @@
+
 export enum AppStage {
+  AUTH = 'AUTH',
   THEME_SELECTION = 'THEME_SELECTION',
   VOCAB_GENERATION = 'VOCAB_GENERATION',
   VOCAB_PREVIEW = 'VOCAB_PREVIEW',
@@ -7,9 +9,37 @@ export enum AppStage {
   ARTICLE_STUDY = 'ARTICLE_STUDY',
   FREE_WRITING = 'FREE_WRITING',
   NOTEBOOK = 'NOTEBOOK',
+  MISTAKE_NOTEBOOK = 'MISTAKE_NOTEBOOK',
 }
 
 export type DifficultyLevel = 'A1' | 'A2' | 'B1' | 'B2' | 'C1' | 'C2' | 'IELTS' | 'TOEFL' | 'SAT';
+
+export interface User {
+  username: string;
+}
+
+export interface MistakeItem {
+  id: string;
+  type: 'spelling' | 'grammar';
+  date: string;
+  word: string; // The target word
+  userInput?: string; // What the user typed
+  correction?: string; // Correct spelling or corrected sentence
+  explanation?: string; // For grammar errors
+  context?: string; // Definition or Chinese translation context
+}
+
+export interface RootAssociation {
+  root: string;
+  meaning: string;
+  relatedWords: string[];
+}
+
+export interface WordExtras {
+  synonyms: string[];
+  antonyms: string[];
+  roots: RootAssociation[];
+}
 
 export interface WordData {
   word: string;
@@ -21,6 +51,7 @@ export interface WordData {
   exampleTranslation: string;
   syllables: string;
   partOfSpeech: string;
+  extras?: WordExtras;
 }
 
 export interface ArticleData {
@@ -68,4 +99,5 @@ export interface LearningSession {
 export interface ChatMessage {
   role: 'user' | 'ai';
   content: string;
+  translation?: string;
 }

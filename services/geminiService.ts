@@ -1,6 +1,6 @@
 
 import { GoogleGenAI, Type, Modality } from "@google/genai";
-import { WordData, ArticleData, SentenceFeedback, WritingFeedback, DifficultyLevel, ChatMessage, PronunciationResult } from "../types";
+import { WordData, ArticleData, SentenceFeedback, WritingFeedback, DifficultyLevel, ChatMessage, PronunciationResult, WordExtras } from "../types";
 
 const getClient = () => new GoogleGenAI({ apiKey: process.env.API_KEY });
 
@@ -56,6 +56,53 @@ export const generateVocabulary = async (theme: string, difficulty: DifficultyLe
     return JSON.parse(response.text) as WordData[];
   }
   throw new Error("Failed to generate vocabulary");
+};
+
+export const generateWordExtras = async (word: string): Promise<WordExtras> => {
+  const ai = getClient();
+  const prompt = `Generate advanced vocabulary details for the English word "${word}".
+  Provide:
+  1. 5 Synonyms (single words).
+  2. 5 Antonyms (single words). If none, return empty array.
+  3. Etymology/Root breakdown. Identify 1-3 key roots, prefixes, or suffixes. For each, provide the meaning and 3-4 other English words derived from it.
+  
+  Example structure for "bicycle":
+  Root: "bi-", Meaning: "two", Related: ["binary", "bilingual"]
+  Root: "-cycle", Meaning: "circle/wheel", Related: ["motorcycle", "recycle"]
+  `;
+
+  const response = await ai.models.generateContent({
+    model: "gemini-2.5-flash",
+    contents: prompt,
+    config: {
+      responseMimeType: "application/json",
+      responseSchema: {
+        type: Type.OBJECT,
+        properties: {
+          synonyms: { type: Type.ARRAY, items: { type: Type.STRING } },
+          antonyms: { type: Type.ARRAY, items: { type: Type.STRING } },
+          roots: {
+            type: Type.ARRAY,
+            items: {
+              type: Type.OBJECT,
+              properties: {
+                root: { type: Type.STRING, description: "The root part, e.g. 'bi-' or '-spect'" },
+                meaning: { type: Type.STRING, description: "Meaning of the root, e.g. 'two'" },
+                relatedWords: { type: Type.ARRAY, items: { type: Type.STRING }, description: "List of other words sharing this root" }
+              },
+              required: ["root", "meaning", "relatedWords"]
+            }
+          }
+        },
+        required: ["synonyms", "antonyms", "roots"]
+      }
+    }
+  });
+
+  if (response.text) {
+    return JSON.parse(response.text) as WordExtras;
+  }
+  throw new Error("Failed to generate word extras");
 };
 
 export const generateWordDetails = async (word: string, theme: string, difficulty: DifficultyLevel): Promise<WordData> => {
@@ -176,7 +223,7 @@ export const askGrammarQuestion = async (
   feedback: SentenceFeedback,
   currentHistory: ChatMessage[],
   question: string
-): Promise<string> => {
+): Promise<{content: string, translation: string}> => {
   const ai = getClient();
   
   const historyText = currentHistory.map(msg => `${msg.role === 'user' ? 'Student' : 'Teacher'}: ${msg.content}`).join('\n');
@@ -195,7 +242,7 @@ export const askGrammarQuestion = async (
 
   Student Question: "${question}"
 
-  Please answer in **English**. Keep explanations clear and simple.
+  Please answer in **English** and provide a **Chinese translation**.
   STRICT FORMAT REQUIREMENTS:
   1. Use a numbered list (1., 2., 3.) if there are multiple points.
   2. Start each point on a NEW LINE.
@@ -206,9 +253,24 @@ export const askGrammarQuestion = async (
   const response = await ai.models.generateContent({
     model: "gemini-2.5-flash",
     contents: prompt,
+    config: {
+        responseMimeType: "application/json",
+        responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+                content: { type: Type.STRING, description: "The answer in English" },
+                translation: { type: Type.STRING, description: "The answer translated to Chinese" }
+            },
+            required: ["content", "translation"]
+        }
+    }
   });
 
-  return response.text || "I'm unable to answer that right now.";
+  if (response.text) {
+      return JSON.parse(response.text) as {content: string, translation: string};
+  }
+  
+  throw new Error("Failed to get answer");
 };
 
 export const generateArticle = async (theme: string, words: string[]): Promise<ArticleData> => {

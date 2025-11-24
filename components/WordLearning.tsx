@@ -1,7 +1,7 @@
 
 import React, { useState, useEffect, useRef } from 'react';
-import { WordData, SentenceFeedback, ChatMessage, PronunciationResult } from '../types';
-import { generateSpeech, checkSentence, askGrammarQuestion, evaluatePronunciation } from '../services/geminiService';
+import { WordData, SentenceFeedback, ChatMessage, PronunciationResult, MistakeItem, WordExtras } from '../types';
+import { generateSpeech, checkSentence, askGrammarQuestion, evaluatePronunciation, generateWordExtras } from '../services/geminiService';
 import { decodeBase64, decodeAudioData, playAudioBuffer, getAudioContext, stopGlobalAudio, blobToBase64 } from '../services/audioUtils';
 import { TranslationReveal } from './TranslationReveal';
 
@@ -10,6 +10,7 @@ interface WordLearningProps {
   onComplete: () => void;
   theme?: string;
   onAddPoints: (points: number) => void;
+  onRecordMistake: (mistake: MistakeItem) => void;
 }
 
 // Helper to render bold text from markdown-style **bold**
@@ -23,8 +24,9 @@ const formatText = (text: string) => {
     });
 };
 
-export const WordLearning: React.FC<WordLearningProps> = ({ words, onComplete, theme, onAddPoints }) => {
+export const WordLearning: React.FC<WordLearningProps> = ({ words, onComplete, theme, onAddPoints, onRecordMistake }) => {
   const [currentIndex, setCurrentIndex] = useState(0);
+  const [localWords, setLocalWords] = useState<WordData[]>(words); // Manage local state to update extras
   const [isPlaying, setIsPlaying] = useState(false);
   const [writeCount, setWriteCount] = useState(0);
   const [currentInput, setCurrentInput] = useState('');
@@ -34,6 +36,10 @@ export const WordLearning: React.FC<WordLearningProps> = ({ words, onComplete, t
   const [userSplits, setUserSplits] = useState<Set<number>>(new Set());
   const [userStress, setUserStress] = useState<Set<number>>(new Set());
   
+  // Extras State (Synonyms, etc)
+  const [loadingExtras, setLoadingExtras] = useState<boolean>(false);
+  const [activeExtra, setActiveExtra] = useState<'synonyms' | 'antonyms' | 'roots' | null>(null);
+
   const [sentenceInput, setSentenceInput] = useState('');
   const [feedback, setFeedback] = useState<SentenceFeedback | null>(null);
   const [isChecking, setIsChecking] = useState(false);
@@ -65,7 +71,7 @@ export const WordLearning: React.FC<WordLearningProps> = ({ words, onComplete, t
   const isSpeakingRef = useRef(false);
   const lastSpeakingTimeRef = useRef(0);
 
-  const currentWord = words[currentIndex];
+  const currentWord = localWords[currentIndex];
   const inputRef = useRef<HTMLInputElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   
@@ -75,12 +81,16 @@ export const WordLearning: React.FC<WordLearningProps> = ({ words, onComplete, t
 
   useEffect(() => {
     isMountedRef.current = true;
+    // Update local words if prop changes significantly (e.g. new session)
+    if (words.length > 0 && words[0].word !== localWords[0]?.word) {
+        setLocalWords(words);
+    }
     return () => {
       isMountedRef.current = false;
       stopGlobalAudio();
       stopRecording();
     };
-  }, []);
+  }, [words]);
 
   // Reset state when word changes
   useEffect(() => {
@@ -98,6 +108,9 @@ export const WordLearning: React.FC<WordLearningProps> = ({ words, onComplete, t
     stopGlobalAudio();
     setIsPlaying(false);
     
+    setActiveExtra(null);
+    setLoadingExtras(false);
+
     // Scroll the active pill into view
     if (scrollRef.current) {
         const activeButton = scrollRef.current.children[currentIndex] as HTMLElement;
@@ -339,6 +352,17 @@ export const WordLearning: React.FC<WordLearningProps> = ({ words, onComplete, t
     } else {
       setWordError("Incorrect spelling. Try again!");
       handlePlayAudio(currentWord.word);
+      
+      // Record Spelling Mistake
+      onRecordMistake({
+          id: Date.now().toString(),
+          type: 'spelling',
+          date: new Date().toLocaleDateString(),
+          word: currentWord.word,
+          userInput: currentInput,
+          correction: currentWord.word,
+          context: currentWord.definition
+      });
     }
   };
 
@@ -391,6 +415,18 @@ export const WordLearning: React.FC<WordLearningProps> = ({ words, onComplete, t
         if (result.isCorrect && !hasAwardedSentencePoints) {
             onAddPoints(10); // Scoring: Make sentence (+10)
             setHasAwardedSentencePoints(true);
+        } else if (!result.isCorrect) {
+            // Record Grammar Mistake
+            onRecordMistake({
+                id: Date.now().toString(),
+                type: 'grammar',
+                date: new Date().toLocaleDateString(),
+                word: currentWord.word,
+                userInput: sentenceInput,
+                correction: result.correctedSentence,
+                explanation: result.explanation,
+                context: `Target word: ${currentWord.word}`
+            });
         }
       }
     } catch (e) {
@@ -421,9 +457,13 @@ export const WordLearning: React.FC<WordLearningProps> = ({ words, onComplete, t
       setIsAsking(true);
 
       try {
-          const answer = await askGrammarQuestion(currentWord.word, sentenceInput, feedback, chatHistory, userQ);
+          const result = await askGrammarQuestion(currentWord.word, sentenceInput, feedback, chatHistory, userQ);
           if (isMountedRef.current) {
-             setChatHistory(prev => [...prev, { role: 'ai', content: answer }]);
+             setChatHistory(prev => [...prev, { 
+                 role: 'ai', 
+                 content: result.content,
+                 translation: result.translation 
+             }]);
           }
       } catch (err) {
           console.error(err);
@@ -432,8 +472,36 @@ export const WordLearning: React.FC<WordLearningProps> = ({ words, onComplete, t
       }
   };
 
+  const handleExtrasClick = async (type: 'synonyms' | 'antonyms' | 'roots') => {
+      if (activeExtra === type) {
+          setActiveExtra(null); // Toggle off
+          return;
+      }
+
+      setActiveExtra(type);
+      
+      if (!currentWord.extras) {
+          setLoadingExtras(true);
+          try {
+             const extras = await generateWordExtras(currentWord.word);
+             if (isMountedRef.current) {
+                // Update local state words with extras
+                const updatedWords = [...localWords];
+                updatedWords[currentIndex] = { ...currentWord, extras };
+                setLocalWords(updatedWords);
+             }
+          } catch (e) {
+             console.error(e);
+             alert("Could not load details at this time.");
+             setActiveExtra(null);
+          } finally {
+              if (isMountedRef.current) setLoadingExtras(false);
+          }
+      }
+  };
+
   const handleNextWord = () => {
-    if (currentIndex < words.length - 1) {
+    if (currentIndex < localWords.length - 1) {
       setCurrentIndex(prev => prev + 1);
       setStep('learn');
       resetStepState();
@@ -462,6 +530,7 @@ export const WordLearning: React.FC<WordLearningProps> = ({ words, onComplete, t
      setHasAwardedPronunciationPoints(false);
      setPronunciationResult(null);
      setIsRecording(false);
+     setActiveExtra(null);
   };
 
   const goBack = () => {
@@ -525,7 +594,7 @@ export const WordLearning: React.FC<WordLearningProps> = ({ words, onComplete, t
     setUserSplits(newSplits);
   };
 
-  const progress = ((currentIndex + 1) / words.length) * 100;
+  const progress = ((currentIndex + 1) / localWords.length) * 100;
   const isHiddenMode = step === 'write_word' && writeCount >= 2;
 
   // Reusable Big Record Button
@@ -623,7 +692,7 @@ export const WordLearning: React.FC<WordLearningProps> = ({ words, onComplete, t
                       </div>
                   </div>
                   <div className="flex items-center gap-3">
-                     <span className="text-sm font-bold text-primary">{currentIndex + 1} / {words.length}</span>
+                     <span className="text-sm font-bold text-primary">{currentIndex + 1} / {localWords.length}</span>
                      <button onClick={onComplete} className="text-gray-400 hover:text-gray-600">
                         <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
@@ -639,7 +708,7 @@ export const WordLearning: React.FC<WordLearningProps> = ({ words, onComplete, t
 
                {/* Horizontal Word List */}
                <div className="flex overflow-x-auto gap-2 pb-2 no-scrollbar scroll-smooth" ref={scrollRef}>
-                   {words.map((w, i) => (
+                   {localWords.map((w, i) => (
                        <button 
                          key={i}
                          onClick={() => handleJumpTo(i)} 
@@ -779,6 +848,87 @@ export const WordLearning: React.FC<WordLearningProps> = ({ words, onComplete, t
                                 {step === 'write_word' && <SmallRecordButton targetText={currentWord.word} />}
                             </div>
                         </div>
+
+                        {/* Extra Buttons Row (Synonyms, etc.) */}
+                         {!isHiddenMode && step === 'learn' && (
+                            <div className="mt-6">
+                                <div className="flex flex-wrap justify-center gap-3">
+                                    <button 
+                                        onClick={() => handleExtrasClick('synonyms')}
+                                        className={`px-4 py-2 rounded-full text-sm font-semibold transition-colors border ${activeExtra === 'synonyms' ? 'bg-primary text-white border-primary' : 'bg-white text-gray-600 border-gray-200 hover:border-primary hover:text-primary'}`}
+                                    >
+                                        Synonyms
+                                    </button>
+                                    <button 
+                                        onClick={() => handleExtrasClick('antonyms')}
+                                        className={`px-4 py-2 rounded-full text-sm font-semibold transition-colors border ${activeExtra === 'antonyms' ? 'bg-primary text-white border-primary' : 'bg-white text-gray-600 border-gray-200 hover:border-primary hover:text-primary'}`}
+                                    >
+                                        Antonyms
+                                    </button>
+                                    <button 
+                                        onClick={() => handleExtrasClick('roots')}
+                                        className={`px-4 py-2 rounded-full text-sm font-semibold transition-colors border ${activeExtra === 'roots' ? 'bg-primary text-white border-primary' : 'bg-white text-gray-600 border-gray-200 hover:border-primary hover:text-primary'}`}
+                                    >
+                                        Etymology & Roots
+                                    </button>
+                                </div>
+
+                                {/* Loading Indicator */}
+                                {loadingExtras && (
+                                    <div className="mt-4 flex justify-center">
+                                        <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-primary"></div>
+                                    </div>
+                                )}
+
+                                {/* Display Content */}
+                                {currentWord.extras && activeExtra && !loadingExtras && (
+                                    <div className="mt-4 p-4 bg-gray-50 rounded-xl text-left border border-gray-200 animate-fade-in max-w-lg mx-auto">
+                                        {activeExtra === 'synonyms' && (
+                                            <div>
+                                                <h4 className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-2">Synonyms</h4>
+                                                <div className="flex flex-wrap gap-2">
+                                                    {currentWord.extras.synonyms.map((s, i) => (
+                                                        <span key={i} className="px-2 py-1 bg-white border border-gray-200 rounded text-gray-700 text-sm font-medium">{s}</span>
+                                                    ))}
+                                                </div>
+                                            </div>
+                                        )}
+                                        {activeExtra === 'antonyms' && (
+                                            <div>
+                                                <h4 className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-2">Antonyms</h4>
+                                                {currentWord.extras.antonyms.length > 0 ? (
+                                                    <div className="flex flex-wrap gap-2">
+                                                        {currentWord.extras.antonyms.map((s, i) => (
+                                                            <span key={i} className="px-2 py-1 bg-white border border-gray-200 rounded text-gray-700 text-sm font-medium">{s}</span>
+                                                        ))}
+                                                    </div>
+                                                ) : <p className="text-gray-500 text-sm">None available.</p>}
+                                            </div>
+                                        )}
+                                        {activeExtra === 'roots' && (
+                                            <div>
+                                                <h4 className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-3">Etymology & Word Association</h4>
+                                                <div className="space-y-3">
+                                                    {currentWord.extras.roots.map((r, i) => (
+                                                        <div key={i} className="bg-white p-3 rounded-lg border border-gray-100">
+                                                            <div className="flex items-center gap-2 mb-1">
+                                                                <span className="font-bold text-primary font-mono">{r.root}</span>
+                                                                <span className="text-gray-400 text-xs">Meaning:</span>
+                                                                <span className="font-medium text-gray-800">{r.meaning}</span>
+                                                            </div>
+                                                            <div className="text-xs text-gray-600">
+                                                                <span className="italic mr-2">Related words:</span>
+                                                                {r.relatedWords.join(', ')}
+                                                            </div>
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            </div>
+                                        )}
+                                    </div>
+                                )}
+                            </div>
+                        )}
                     </div>
                 )}
               </div>
@@ -794,7 +944,7 @@ export const WordLearning: React.FC<WordLearningProps> = ({ words, onComplete, t
             
             {/* Page Number Indicator */}
             <div className="absolute bottom-4 right-6 text-gray-300 font-mono font-bold text-xl select-none">
-               {currentIndex + 1} / {words.length}
+               {currentIndex + 1} / {localWords.length}
             </div>
 
             {/* Definition Section - HIDDEN when in Copy Sentence or Make Sentence step to avoid clutter/duplication */}
@@ -1071,8 +1221,15 @@ export const WordLearning: React.FC<WordLearningProps> = ({ words, onComplete, t
                                             } else {
                                                 return (
                                                     <div key={idx} className="flex justify-start">
-                                                        <div className="bg-white text-gray-800 px-5 py-4 rounded-2xl rounded-tl-sm text-sm border border-gray-200 shadow-sm max-w-full w-full whitespace-pre-wrap leading-relaxed">
-                                                            {formatText(msg.content)}
+                                                        <div className="bg-white text-gray-800 px-5 py-4 rounded-2xl rounded-tl-sm text-sm border border-gray-200 shadow-sm max-w-full w-full">
+                                                            <div className="whitespace-pre-wrap leading-relaxed">
+                                                                {formatText(msg.content)}
+                                                            </div>
+                                                            {msg.translation && (
+                                                                <div className="mt-2 pt-2 border-t border-gray-100">
+                                                                     <TranslationReveal text={msg.translation} />
+                                                                </div>
+                                                            )}
                                                         </div>
                                                     </div>
                                                 )
@@ -1125,7 +1282,7 @@ export const WordLearning: React.FC<WordLearningProps> = ({ words, onComplete, t
                                     onClick={handleNextWord}
                                     className="flex-1 bg-primary text-white font-bold py-3 rounded-xl hover:bg-primary/90 transition-colors shadow-md hover:shadow-lg transform hover:-translate-y-0.5"
                                 >
-                                    {currentIndex < words.length - 1 ? 'Next Word' : 'Finish Vocabulary'}
+                                    {currentIndex < localWords.length - 1 ? 'Next Word' : 'Finish Vocabulary'}
                                 </button>
                             </div>
 
