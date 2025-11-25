@@ -61,14 +61,21 @@ export const generateVocabulary = async (theme: string, difficulty: DifficultyLe
 export const generateWordExtras = async (word: string): Promise<WordExtras> => {
   const ai = getClient();
   const prompt = `Generate advanced vocabulary details for the English word "${word}".
-  Provide:
-  1. 5 Synonyms (single words).
-  2. 5 Antonyms (single words). If none, return empty array.
-  3. Etymology/Root breakdown. Identify 1-3 key roots, prefixes, or suffixes. For each, provide the meaning and 3-4 other English words derived from it.
+  Provide in JSON format:
+  1. "synonyms": A list of 5 synonyms. Each item must have "word" (English) and "cn" (Chinese definition).
+  2. "antonyms": A list of 5 antonyms. Each item must have "word" (English) and "cn" (Chinese definition). If none, return empty list.
+  3. "roots": Etymology/Root breakdown. Identify 1-3 key roots, prefixes, or suffixes. 
+     For each root, provide:
+     - "root" (e.g. "bi-")
+     - "meaning" (e.g. "two / 二")
+     - "relatedWords": A list of 3-4 related words derived from it. Each related word must have "word" (English) and "definition" (Chinese definition).
   
-  Example structure for "bicycle":
-  Root: "bi-", Meaning: "two", Related: ["binary", "bilingual"]
-  Root: "-cycle", Meaning: "circle/wheel", Related: ["motorcycle", "recycle"]
+  Example JSON structure:
+  {
+    "synonyms": [ { "word": "example", "cn": "例子" } ],
+    "antonyms": [],
+    "roots": [ { "root": "ex-", "meaning": "out", "relatedWords": [ { "word": "exit", "definition": "出口" } ] } ]
+  }
   `;
 
   const response = await ai.models.generateContent({
@@ -79,16 +86,47 @@ export const generateWordExtras = async (word: string): Promise<WordExtras> => {
       responseSchema: {
         type: Type.OBJECT,
         properties: {
-          synonyms: { type: Type.ARRAY, items: { type: Type.STRING } },
-          antonyms: { type: Type.ARRAY, items: { type: Type.STRING } },
+          synonyms: { 
+            type: Type.ARRAY, 
+            items: { 
+                type: Type.OBJECT,
+                properties: {
+                    word: { type: Type.STRING },
+                    cn: { type: Type.STRING, description: "Chinese definition" }
+                },
+                required: ["word", "cn"]
+            } 
+          },
+          antonyms: { 
+            type: Type.ARRAY, 
+            items: { 
+                type: Type.OBJECT,
+                properties: {
+                    word: { type: Type.STRING },
+                    cn: { type: Type.STRING, description: "Chinese definition" }
+                },
+                required: ["word", "cn"]
+            } 
+          },
           roots: {
             type: Type.ARRAY,
             items: {
               type: Type.OBJECT,
               properties: {
                 root: { type: Type.STRING, description: "The root part, e.g. 'bi-' or '-spect'" },
-                meaning: { type: Type.STRING, description: "Meaning of the root, e.g. 'two'" },
-                relatedWords: { type: Type.ARRAY, items: { type: Type.STRING }, description: "List of other words sharing this root" }
+                meaning: { type: Type.STRING, description: "Meaning of the root in English and Chinese" },
+                relatedWords: { 
+                    type: Type.ARRAY, 
+                    items: { 
+                        type: Type.OBJECT,
+                        properties: {
+                            word: { type: Type.STRING },
+                            definition: { type: Type.STRING, description: "Chinese definition of the related word" }
+                        },
+                        required: ["word", "definition"]
+                    }, 
+                    description: "List of related words with definitions" 
+                }
               },
               required: ["root", "meaning", "relatedWords"]
             }
@@ -184,10 +222,10 @@ export const checkSentence = async (word: string, sentence: string): Promise<Sen
   
   CRITICAL INSTRUCTIONS FOR "explanation":
   - If "isCorrect" is FALSE:
-    1. ONLY list the categories that have errors.
+    1. ONLY list the categories that have errors (Spelling, Grammar, Expression). Do NOT list correct categories.
     2. Start each point on a new line using a number (1., 2., etc.).
     3. Use **bold** for key terms or corrections.
-    4. Categories to check: **Spelling**, **Grammar**, **Expression**.
+    4. Keep explanation concise.
     
   - If "isCorrect" is TRUE:
     - Simply praise the sentence in English (e.g. "Excellent usage!").
@@ -394,7 +432,7 @@ export const evaluatePronunciation = async (audioBase64: string, targetText: str
         { text: prompt },
         {
           inlineData: {
-            mimeType: "audio/webm", // Browsers typically record as webm or mp4, Gemini handles it.
+            mimeType: "audio/webm", 
             data: audioBase64
           }
         }

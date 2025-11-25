@@ -1,6 +1,6 @@
 
 import React, { useState, useEffect, useRef } from 'react';
-import { WordData, SentenceFeedback, ChatMessage, PronunciationResult, MistakeItem, WordExtras } from '../types';
+import { WordData, SentenceFeedback, ChatMessage, PronunciationResult, MistakeItem, RootAssociation, WordExtras } from '../types';
 import { generateSpeech, checkSentence, askGrammarQuestion, evaluatePronunciation, generateWordExtras } from '../services/geminiService';
 import { decodeBase64, decodeAudioData, playAudioBuffer, getAudioContext, stopGlobalAudio, blobToBase64 } from '../services/audioUtils';
 import { TranslationReveal } from './TranslationReveal';
@@ -24,9 +24,25 @@ const formatText = (text: string) => {
     });
 };
 
+const renderEtymologyTree = (root: RootAssociation) => {
+  const lines: string[] = [];
+  lines.push(`${root.root} (Root/Prefix)`);
+  lines.push(`│  Meaning: ${root.meaning}`);
+  lines.push("│");
+  root.relatedWords.forEach((item, index) => {
+    const isLast = index === root.relatedWords.length - 1;
+    const prefix = isLast ? "└─" : "├─";
+    // Pad for alignment
+    const paddedWord = item.word.padEnd(14, " ");
+    lines.push(`${prefix} ${paddedWord} ──→  ${item.definition}`);
+    if (!isLast) lines.push("│");
+  });
+  return lines.join("\n");
+};
+
 export const WordLearning: React.FC<WordLearningProps> = ({ words, onComplete, theme, onAddPoints, onRecordMistake }) => {
   const [currentIndex, setCurrentIndex] = useState(0);
-  const [localWords, setLocalWords] = useState<WordData[]>(words); // Manage local state to update extras
+  const [localWords, setLocalWords] = useState<WordData[]>(words); 
   const [isPlaying, setIsPlaying] = useState(false);
   const [writeCount, setWriteCount] = useState(0);
   const [currentInput, setCurrentInput] = useState('');
@@ -36,9 +52,9 @@ export const WordLearning: React.FC<WordLearningProps> = ({ words, onComplete, t
   const [userSplits, setUserSplits] = useState<Set<number>>(new Set());
   const [userStress, setUserStress] = useState<Set<number>>(new Set());
   
-  // Extras State (Synonyms, etc)
-  const [loadingExtras, setLoadingExtras] = useState<boolean>(false);
-  const [activeExtra, setActiveExtra] = useState<'synonyms' | 'antonyms' | 'roots' | null>(null);
+  // Extras State
+  const [activeTab, setActiveTab] = useState<'synonyms' | 'antonyms' | 'roots' | null>(null);
+  const [showAllModal, setShowAllModal] = useState(false);
 
   const [sentenceInput, setSentenceInput] = useState('');
   const [feedback, setFeedback] = useState<SentenceFeedback | null>(null);
@@ -46,7 +62,7 @@ export const WordLearning: React.FC<WordLearningProps> = ({ words, onComplete, t
   const [copyError, setCopyError] = useState<string | null>(null);
   const [wordError, setWordError] = useState<string | null>(null);
   
-  // Scoring tracking to prevent double points
+  // Scoring tracking
   const [hasAwardedSentencePoints, setHasAwardedSentencePoints] = useState(false);
   const [hasAwardedPronunciationPoints, setHasAwardedPronunciationPoints] = useState(false);
 
@@ -81,7 +97,6 @@ export const WordLearning: React.FC<WordLearningProps> = ({ words, onComplete, t
 
   useEffect(() => {
     isMountedRef.current = true;
-    // Update local words if prop changes significantly (e.g. new session)
     if (words.length > 0 && words[0].word !== localWords[0]?.word) {
         setLocalWords(words);
     }
@@ -103,15 +118,19 @@ export const WordLearning: React.FC<WordLearningProps> = ({ words, onComplete, t
     setPronunciationResult(null);
     setIsRecording(false);
     setIsAnalyzingAudio(false);
-    stopRecording(); // Ensure any active recording is stopped
+    stopRecording(); 
     
     stopGlobalAudio();
     setIsPlaying(false);
     
-    setActiveExtra(null);
-    setLoadingExtras(false);
+    setActiveTab(null);
+    setShowAllModal(false);
 
-    // Scroll the active pill into view
+    // Auto fetch extras if missing
+    if (localWords[currentIndex] && !localWords[currentIndex].extras) {
+        fetchExtras(localWords[currentIndex].word);
+    }
+
     if (scrollRef.current) {
         const activeButton = scrollRef.current.children[currentIndex] as HTMLElement;
         if (activeButton) {
@@ -120,20 +139,34 @@ export const WordLearning: React.FC<WordLearningProps> = ({ words, onComplete, t
     }
   }, [currentIndex]);
 
-  // Reset error when input changes
+  const fetchExtras = async (word: string) => {
+      try {
+          const extras = await generateWordExtras(word);
+          if (isMountedRef.current) {
+              setLocalWords(prev => {
+                  const newWords = [...prev];
+                  if (newWords[currentIndex].word === word) {
+                      newWords[currentIndex] = { ...newWords[currentIndex], extras };
+                  }
+                  return newWords;
+              });
+          }
+      } catch (e) {
+          console.error("Failed to auto-fetch extras", e);
+      }
+  };
+
   useEffect(() => {
     setCopyError(null);
     setWordError(null);
   }, [currentInput]);
 
-  // Scroll to bottom of chat
   useEffect(() => {
     if (chatEndRef.current && chatHistory.length > 0) {
         chatEndRef.current.scrollIntoView({ behavior: "smooth" });
     }
   }, [chatHistory, isAsking]);
 
-  // Audio Auto-play Effect
   useEffect(() => {
     if (step === 'learn') {
       handlePlayAudio(currentWord.word);
@@ -149,23 +182,16 @@ export const WordLearning: React.FC<WordLearningProps> = ({ words, onComplete, t
 
   const handlePlayAudio = async (text: string) => {
     const audioId = ++currentAudioIdRef.current;
-
-    // Indicate loading state immediately
     setIsPlaying(true);
-    
-    // Stop any previous audio to ensure clean slate
     stopGlobalAudio();
     
     try {
       const base64Audio = await generateSpeech(text);
-      
-      // Check if component is still mounted and this is the latest request
       if (!isMountedRef.current || audioId !== currentAudioIdRef.current) return;
 
       if (base64Audio) {
         const ctx = getAudioContext();
         const audioBuffer = await decodeAudioData(decodeBase64(base64Audio), ctx);
-        
         if (!isMountedRef.current || audioId !== currentAudioIdRef.current) return;
 
         playAudioBuffer(audioBuffer, () => {
@@ -198,23 +224,18 @@ export const WordLearning: React.FC<WordLearningProps> = ({ words, onComplete, t
         const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
         mediaRecorderRef.current = new MediaRecorder(stream);
         audioChunksRef.current = [];
-        
         mediaRecorderRef.current.ondataavailable = (event) => {
             audioChunksRef.current.push(event.data);
         };
-        
         mediaRecorderRef.current.start();
         setIsRecording(true);
 
-        // --- Silence Detection Setup ---
         const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
         const audioCtx = new AudioContextClass();
         audioContextRef.current = audioCtx;
-        
         const analyser = audioCtx.createAnalyser();
         analyser.fftSize = 2048;
         analyserRef.current = analyser;
-        
         const source = audioCtx.createMediaStreamSource(stream);
         sourceRef.current = source;
         source.connect(analyser);
@@ -222,48 +243,35 @@ export const WordLearning: React.FC<WordLearningProps> = ({ words, onComplete, t
         const bufferLength = analyser.frequencyBinCount;
         const dataArray = new Uint8Array(bufferLength);
         
-        // Reset detection state
         isSpeakingRef.current = false;
         lastSpeakingTimeRef.current = Date.now();
         
         const detectSilence = () => {
             if (!analyserRef.current) return;
-            
             analyserRef.current.getByteTimeDomainData(dataArray);
-            
-            // Calculate RMS Volume
             let sum = 0;
             for(let i = 0; i < bufferLength; i++) {
                 const x = (dataArray[i] - 128) / 128.0;
                 sum += x * x;
             }
             const rms = Math.sqrt(sum / bufferLength);
-            const THRESHOLD = 0.015; // Speaking threshold
-            
+            const THRESHOLD = 0.015;
             if (rms > THRESHOLD) {
                 isSpeakingRef.current = true;
                 lastSpeakingTimeRef.current = Date.now();
             }
-            
             const now = Date.now();
-            
-            // If speech started and then silence for > 1.2s, stop
             if (isSpeakingRef.current && (now - lastSpeakingTimeRef.current > 1200)) {
                 stopRecording(targetText);
                 return;
             }
-            
-            // Safety timeout: If no speech for 8 seconds, stop
             if (!isSpeakingRef.current && (now - lastSpeakingTimeRef.current > 8000)) {
-                stopRecording(); // Stop without analyzing
+                stopRecording();
                 return;
             }
-            
             animationFrameRef.current = requestAnimationFrame(detectSilence);
         };
-        
         detectSilence();
-
     } catch (err) {
         console.error("Error accessing microphone:", err);
         alert("Could not access microphone. Please check permissions.");
@@ -271,7 +279,6 @@ export const WordLearning: React.FC<WordLearningProps> = ({ words, onComplete, t
   };
 
   const stopRecording = (targetText?: string) => {
-      // Clean up silence detection resources
       if (animationFrameRef.current) {
           cancelAnimationFrame(animationFrameRef.current);
           animationFrameRef.current = null;
@@ -293,14 +300,10 @@ export const WordLearning: React.FC<WordLearningProps> = ({ words, onComplete, t
           if (targetText) {
              mediaRecorderRef.current.onstop = async () => {
                  const audioBlob = new Blob(audioChunksRef.current, { type: mediaRecorderRef.current?.mimeType || 'audio/webm' });
-                 
-                 // Stop all tracks
                  mediaRecorderRef.current?.stream.getTracks().forEach(track => track.stop());
-                 
                  handleAnalyzeAudio(audioBlob, targetText);
              };
           } else {
-             // Cleanup mode: just stop tracks, don't analyze
              mediaRecorderRef.current.onstop = null;
              mediaRecorderRef.current?.stream.getTracks().forEach(track => track.stop());
           }
@@ -316,7 +319,6 @@ export const WordLearning: React.FC<WordLearningProps> = ({ words, onComplete, t
           const result = await evaluatePronunciation(base64, targetText);
           if (isMountedRef.current) {
               setPronunciationResult(result);
-              // Bonus points for completing pronunciation (score >= 60)
               if (result.score >= 60 && !hasAwardedPronunciationPoints) {
                   onAddPoints(5);
                   setHasAwardedPronunciationPoints(true);
@@ -335,7 +337,6 @@ export const WordLearning: React.FC<WordLearningProps> = ({ words, onComplete, t
   const handleWordInputSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (currentInput.toLowerCase().trim() === currentWord.word.toLowerCase()) {
-      // Scoring: 0 & 1 are copying (+1), 2 is memory (+3)
       if (writeCount < 2) {
         onAddPoints(1);
       } else {
@@ -353,7 +354,6 @@ export const WordLearning: React.FC<WordLearningProps> = ({ words, onComplete, t
       setWordError("Incorrect spelling. Try again!");
       handlePlayAudio(currentWord.word);
       
-      // Record Spelling Mistake
       onRecordMistake({
           id: Date.now().toString(),
           type: 'spelling',
@@ -361,6 +361,7 @@ export const WordLearning: React.FC<WordLearningProps> = ({ words, onComplete, t
           word: currentWord.word,
           userInput: currentInput,
           correction: currentWord.word,
+          translation: currentWord.translation,
           context: currentWord.definition
       });
     }
@@ -368,14 +369,12 @@ export const WordLearning: React.FC<WordLearningProps> = ({ words, onComplete, t
 
   const handleCopySentenceSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    
     const normalize = (s: string) => s.toLowerCase().replace(/[.,/#!$%^&*;:{}=\-_`~()]/g, "").trim();
-    
     const normalizedInput = normalize(currentInput);
     const normalizedTarget = normalize(currentWord.exampleSentence);
 
     if (normalizedInput === normalizedTarget) {
-      onAddPoints(5); // Scoring: Copy sentence (+5)
+      onAddPoints(5);
       setCurrentInput('');
       setStep('make_sentence');
       setCopyError(null);
@@ -383,9 +382,7 @@ export const WordLearning: React.FC<WordLearningProps> = ({ words, onComplete, t
         const clean = (s: string) => s.toLowerCase().replace(/[.,/#!$%^&*;:{}=\-_`~()]/g, " ").trim();
         const targetWords = clean(currentWord.exampleSentence).split(/\s+/);
         const inputWords = clean(currentInput).split(/\s+/);
-        
         let errorMsg = "The sentence is not quite right.";
-
         for (let i = 0; i < targetWords.length; i++) {
             if (!inputWords[i]) {
                 errorMsg = `Missing word: It seems you stopped before "${targetWords[i]}".`;
@@ -396,11 +393,9 @@ export const WordLearning: React.FC<WordLearningProps> = ({ words, onComplete, t
                 break;
             }
         }
-        
         if (errorMsg === "The sentence is not quite right." && inputWords.length > targetWords.length) {
              errorMsg = `Extra words detected: The sentence is longer than expected.`;
         }
-
         setCopyError(errorMsg);
     }
   };
@@ -413,10 +408,9 @@ export const WordLearning: React.FC<WordLearningProps> = ({ words, onComplete, t
       if (isMountedRef.current) {
         setFeedback(result);
         if (result.isCorrect && !hasAwardedSentencePoints) {
-            onAddPoints(10); // Scoring: Make sentence (+10)
+            onAddPoints(10); 
             setHasAwardedSentencePoints(true);
         } else if (!result.isCorrect) {
-            // Record Grammar Mistake
             onRecordMistake({
                 id: Date.now().toString(),
                 type: 'grammar',
@@ -425,6 +419,7 @@ export const WordLearning: React.FC<WordLearningProps> = ({ words, onComplete, t
                 userInput: sentenceInput,
                 correction: result.correctedSentence,
                 explanation: result.explanation,
+                translation: currentWord.translation,
                 context: `Target word: ${currentWord.word}`
             });
         }
@@ -442,20 +437,16 @@ export const WordLearning: React.FC<WordLearningProps> = ({ words, onComplete, t
       setIsChecking(false);
       setChatHistory([]);
       setQuestionInput('');
-      // Do not reset hasAwardedSentencePoints to prevent farming points for the same word
   };
 
   const handleAskSubmit = async (e?: React.FormEvent) => {
       e?.preventDefault();
       if (!questionInput.trim() || isAsking || !feedback) return;
-
       const userQ = questionInput;
       setQuestionInput('');
-      
       const newHistory: ChatMessage[] = [...chatHistory, { role: 'user', content: userQ }];
       setChatHistory(newHistory);
       setIsAsking(true);
-
       try {
           const result = await askGrammarQuestion(currentWord.word, sentenceInput, feedback, chatHistory, userQ);
           if (isMountedRef.current) {
@@ -469,34 +460,6 @@ export const WordLearning: React.FC<WordLearningProps> = ({ words, onComplete, t
           console.error(err);
       } finally {
           if (isMountedRef.current) setIsAsking(false);
-      }
-  };
-
-  const handleExtrasClick = async (type: 'synonyms' | 'antonyms' | 'roots') => {
-      if (activeExtra === type) {
-          setActiveExtra(null); // Toggle off
-          return;
-      }
-
-      setActiveExtra(type);
-      
-      if (!currentWord.extras) {
-          setLoadingExtras(true);
-          try {
-             const extras = await generateWordExtras(currentWord.word);
-             if (isMountedRef.current) {
-                // Update local state words with extras
-                const updatedWords = [...localWords];
-                updatedWords[currentIndex] = { ...currentWord, extras };
-                setLocalWords(updatedWords);
-             }
-          } catch (e) {
-             console.error(e);
-             alert("Could not load details at this time.");
-             setActiveExtra(null);
-          } finally {
-              if (isMountedRef.current) setLoadingExtras(false);
-          }
       }
   };
 
@@ -530,7 +493,8 @@ export const WordLearning: React.FC<WordLearningProps> = ({ words, onComplete, t
      setHasAwardedPronunciationPoints(false);
      setPronunciationResult(null);
      setIsRecording(false);
-     setActiveExtra(null);
+     setActiveTab(null);
+     setShowAllModal(false);
   };
 
   const goBack = () => {
@@ -559,7 +523,6 @@ export const WordLearning: React.FC<WordLearningProps> = ({ words, onComplete, t
     }
   };
 
-  // Syllable Interaction Handlers
   const toggleSplit = (index: number) => {
     const newSplits = new Set(userSplits);
     if (newSplits.has(index)) {
@@ -582,11 +545,9 @@ export const WordLearning: React.FC<WordLearningProps> = ({ words, onComplete, t
 
   const showCorrectSyllables = () => {
     if (!currentWord.syllables) return;
-    
     const syllableParts = currentWord.syllables.toLowerCase().split('-');
     let currentIndex = 0;
     const newSplits = new Set<number>();
-    
     for (let i = 0; i < syllableParts.length - 1; i++) {
       currentIndex += syllableParts[i].length;
       newSplits.add(currentIndex - 1); 
@@ -597,7 +558,6 @@ export const WordLearning: React.FC<WordLearningProps> = ({ words, onComplete, t
   const progress = ((currentIndex + 1) / localWords.length) * 100;
   const isHiddenMode = step === 'write_word' && writeCount >= 2;
 
-  // Reusable Big Record Button
   const BigRecordButton = ({ targetText }: { targetText: string }) => (
     <div className="flex justify-center w-full">
         <button
@@ -612,7 +572,6 @@ export const WordLearning: React.FC<WordLearningProps> = ({ words, onComplete, t
               disabled:opacity-70 disabled:transform-none disabled:cursor-wait
           `}
         >
-           {/* Icon Logic */}
            {isAnalyzingAudio ? (
                <span className="flex items-center gap-2">
                    <svg className="animate-spin h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
@@ -641,7 +600,6 @@ export const WordLearning: React.FC<WordLearningProps> = ({ words, onComplete, t
     </div>
   );
 
-  // Small Recording Button Component (Used in other steps)
   const SmallRecordButton = ({ targetText }: { targetText: string }) => (
     <div className="flex flex-col items-center">
         <button
@@ -674,9 +632,88 @@ export const WordLearning: React.FC<WordLearningProps> = ({ words, onComplete, t
     </div>
   );
 
+  // --- Renders for Extras ---
+  const renderSynonyms = (extras: WordExtras | undefined) => (
+      extras?.synonyms && extras.synonyms.length > 0 ? (
+          extras.synonyms.map((item, i) => (
+              <div key={i} className="text-lg text-gray-700 flex items-center justify-between border-b border-gray-100 pb-2 last:border-0 py-1">
+                  <span className="font-bold text-gray-800 mr-2">{item.word}</span>
+                  <span className="text-gray-400 mx-2">——</span>
+                  <span className="text-gray-600">{item.cn}</span>
+              </div>
+          ))
+      ) : <div className="text-gray-400 text-sm">None available.</div>
+  );
+
+  const renderAntonyms = (extras: WordExtras | undefined) => (
+      extras?.antonyms && extras.antonyms.length > 0 ? (
+          extras.antonyms.map((item, i) => (
+              <div key={i} className="text-lg text-gray-700 flex items-center justify-between border-b border-gray-100 pb-2 last:border-0 py-1">
+                  <span className="font-bold text-gray-800 mr-2">{item.word}</span>
+                  <span className="text-gray-400 mx-2">——</span>
+                  <span className="text-gray-600">{item.cn}</span>
+              </div>
+          ))
+      ) : <div className="text-gray-400 text-sm">None available.</div>
+  );
+
+  const renderRoots = (extras: WordExtras | undefined) => (
+      extras?.roots ? (
+          extras.roots.map((root, i) => (
+              <pre key={i} className="text-sm md:text-base text-gray-700 font-mono bg-gray-50 p-4 rounded-lg overflow-x-auto border border-gray-200 leading-relaxed whitespace-pre-wrap mb-2">
+                  {renderEtymologyTree(root)}
+              </pre>
+          ))
+      ) : <div className="text-center text-gray-400">Loading roots...</div>
+  );
+
   return (
     <div className="max-w-6xl mx-auto w-full">
-      {/* Navigation Header (Not Sticky) */}
+      {/* Show All Modal */}
+      {showAllModal && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4" onClick={() => setShowAllModal(false)}>
+              <div 
+                className="bg-white w-full max-w-3xl max-h-[80vh] rounded-2xl shadow-2xl flex flex-col overflow-hidden animate-fade-in"
+                onClick={(e) => e.stopPropagation()}
+              >
+                  <div className="p-4 border-b border-gray-100 flex justify-between items-center bg-gray-50">
+                      <h3 className="text-xl font-bold text-gray-800">All Vocabulary Details</h3>
+                      <button onClick={() => setShowAllModal(false)} className="text-gray-400 hover:text-gray-600">
+                          <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                          </svg>
+                      </button>
+                  </div>
+                  <div className="p-6 overflow-y-auto space-y-8">
+                      <div>
+                          <div className="flex items-center gap-2 mb-4 text-primary border-b pb-2 border-gray-100">
+                              <h4 className="text-lg font-bold uppercase tracking-wider">Synonyms</h4>
+                              <span className="text-xs font-normal bg-blue-50 px-2 py-0.5 rounded-full">Similar meanings</span>
+                          </div>
+                          <div className="flex flex-col gap-2">{renderSynonyms(currentWord.extras)}</div>
+                      </div>
+                      
+                      <div>
+                          <div className="flex items-center gap-2 mb-4 text-red-500 border-b pb-2 border-gray-100">
+                              <h4 className="text-lg font-bold uppercase tracking-wider">Antonyms</h4>
+                              <span className="text-xs font-normal bg-red-50 px-2 py-0.5 rounded-full">Opposites</span>
+                          </div>
+                          <div className="flex flex-col gap-2">{renderAntonyms(currentWord.extras)}</div>
+                      </div>
+
+                      <div>
+                          <div className="flex items-center gap-2 mb-4 text-purple-600 border-b pb-2 border-gray-100">
+                              <h4 className="text-lg font-bold uppercase tracking-wider">Etymology & Roots</h4>
+                              <span className="text-xs font-normal bg-purple-50 px-2 py-0.5 rounded-full">Word origin</span>
+                          </div>
+                          <div className="space-y-4">{renderRoots(currentWord.extras)}</div>
+                      </div>
+                  </div>
+              </div>
+          </div>
+      )}
+
+      {/* Navigation Header */}
       <div className="bg-white border-b border-gray-100 mb-6 shadow-sm">
            <div className="max-w-4xl mx-auto px-4 pt-4 pb-2">
                <div className="flex justify-between items-center mb-2">
@@ -701,12 +738,10 @@ export const WordLearning: React.FC<WordLearningProps> = ({ words, onComplete, t
                   </div>
                </div>
                
-               {/* Progress Bar */}
                <div className="h-1.5 bg-gray-100 rounded-full overflow-hidden mb-4">
                    <div className="h-full bg-primary transition-all duration-500 ease-out" style={{ width: `${progress}%` }} />
                </div>
 
-               {/* Horizontal Word List */}
                <div className="flex overflow-x-auto gap-2 pb-2 no-scrollbar scroll-smooth" ref={scrollRef}>
                    {localWords.map((w, i) => (
                        <button 
@@ -726,7 +761,6 @@ export const WordLearning: React.FC<WordLearningProps> = ({ words, onComplete, t
       </div>
 
       <div className="px-4 flex items-start justify-center gap-4">
-        {/* Left Arrow */}
         <button 
             onClick={goBack}
             disabled={currentIndex === 0 && step === 'learn'}
@@ -740,10 +774,10 @@ export const WordLearning: React.FC<WordLearningProps> = ({ words, onComplete, t
 
         <div className="w-full max-w-4xl">
           <div className="bg-white rounded-2xl shadow-lg p-8 border border-gray-100 min-h-[500px] relative">
-            {/* Word Display */}
+            
+            {/* Word Display Header */}
             <div className="flex justify-between items-start mb-8">
               <div className="w-full">
-                
                 {isHiddenMode ? (
                     <div className="mt-2 flex items-center space-x-3 justify-center py-8 animate-pulse">
                         <h2 className="text-5xl font-bold text-gray-300 tracking-widest">??????</h2>
@@ -758,12 +792,10 @@ export const WordLearning: React.FC<WordLearningProps> = ({ words, onComplete, t
                     </div>
                 ) : (
                     <div className="mt-4">
-                        {/* Interactive Word Area */}
+                        {/* Interactive Word */}
                         <div className="flex flex-col items-center">
-                          
                           <div className="flex items-center select-none flex-wrap justify-center">
                             {currentWord.word.split('').map((char, idx, arr) => {
-                              // Calculate which segment color to use
                               let segmentCount = 0;
                               for(let i=0; i<idx; i++) {
                                 if (userSplits.has(i)) segmentCount++;
@@ -773,7 +805,6 @@ export const WordLearning: React.FC<WordLearningProps> = ({ words, onComplete, t
 
                               return (
                                 <React.Fragment key={idx}>
-                                  {/* The Character */}
                                   <span 
                                     onClick={() => toggleStress(idx)}
                                     className={`text-5xl md:text-6xl font-bold cursor-pointer transition-colors duration-300 hover:opacity-80
@@ -783,8 +814,6 @@ export const WordLearning: React.FC<WordLearningProps> = ({ words, onComplete, t
                                   >
                                     {char}
                                   </span>
-
-                                  {/* The Splitter Gap */}
                                   {idx < arr.length - 1 && (
                                     <span 
                                       onClick={() => toggleSplit(idx)}
@@ -802,7 +831,6 @@ export const WordLearning: React.FC<WordLearningProps> = ({ words, onComplete, t
                             })}
                           </div>
 
-                          {/* Controls for Interaction */}
                           {step === 'learn' && (
                             <div className="mt-4 flex gap-4 text-sm">
                                 <button 
@@ -822,7 +850,6 @@ export const WordLearning: React.FC<WordLearningProps> = ({ words, onComplete, t
                                 </button>
                             </div>
                           )}
-
                         </div>
 
                         <div className="flex items-center justify-center mt-6 space-x-4">
@@ -833,7 +860,6 @@ export const WordLearning: React.FC<WordLearningProps> = ({ words, onComplete, t
                             )}
                             <span className="text-gray-500 font-mono text-lg">/{currentWord.phonetic}/</span>
                             
-                            {/* Audio Controls Row */}
                             <div className="flex items-center gap-2 ml-2">
                                 <button 
                                     onClick={() => handlePlayAudio(currentWord.word)}
@@ -844,86 +870,48 @@ export const WordLearning: React.FC<WordLearningProps> = ({ words, onComplete, t
                                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.536 8.464a5 5 0 010 7.072m2.828-9.9a9 9 0 010 12.728M5.586 15H4a1 1 0 01-1-1v-4a1 1 0 011-1h1.586l4.707-4.707C10.923 3.663 12 4.109 12 5v14c0 .891-1.077 1.337-1.707.707L5.586 15z" />
                                     </svg>
                                 </button>
-                                {/* Show small record button ONLY in 'write_word' step for quick check */}
                                 {step === 'write_word' && <SmallRecordButton targetText={currentWord.word} />}
                             </div>
                         </div>
 
-                        {/* Extra Buttons Row (Synonyms, etc.) */}
+                        {/* EXTRAS - Tabbed Interface */}
                          {!isHiddenMode && step === 'learn' && (
-                            <div className="mt-6">
-                                <div className="flex flex-wrap justify-center gap-3">
-                                    <button 
-                                        onClick={() => handleExtrasClick('synonyms')}
-                                        className={`px-4 py-2 rounded-full text-sm font-semibold transition-colors border ${activeExtra === 'synonyms' ? 'bg-primary text-white border-primary' : 'bg-white text-gray-600 border-gray-200 hover:border-primary hover:text-primary'}`}
+                            <div className="mt-8 relative flex flex-col items-center w-full max-w-2xl mx-auto">
+                                <div className="flex flex-wrap justify-center gap-2 relative z-20 border-b border-gray-200 w-full pb-1">
+                                    {(['synonyms', 'antonyms', 'roots'] as const).map(tabKey => (
+                                        <button
+                                            key={tabKey}
+                                            onClick={() => setActiveTab(activeTab === tabKey ? null : tabKey)}
+                                            className={`px-4 py-2 rounded-t-lg text-sm font-bold transition-all border-b-2 -mb-[5px] 
+                                                ${activeTab === tabKey 
+                                                    ? 'border-primary text-primary bg-blue-50/50' 
+                                                    : 'border-transparent text-gray-500 hover:text-gray-700 hover:bg-gray-50'
+                                                }`}
+                                        >
+                                            {tabKey === 'synonyms' ? 'Synonyms' : 
+                                             tabKey === 'antonyms' ? 'Antonyms' : 'Etymology'}
+                                        </button>
+                                    ))}
+                                    {/* Show All Button */}
+                                    <button
+                                        onClick={() => setShowAllModal(true)}
+                                        className="px-4 py-2 rounded-t-lg text-sm font-bold text-gray-500 hover:text-primary hover:bg-gray-50 transition-all flex items-center gap-1"
                                     >
-                                        Synonyms
-                                    </button>
-                                    <button 
-                                        onClick={() => handleExtrasClick('antonyms')}
-                                        className={`px-4 py-2 rounded-full text-sm font-semibold transition-colors border ${activeExtra === 'antonyms' ? 'bg-primary text-white border-primary' : 'bg-white text-gray-600 border-gray-200 hover:border-primary hover:text-primary'}`}
-                                    >
-                                        Antonyms
-                                    </button>
-                                    <button 
-                                        onClick={() => handleExtrasClick('roots')}
-                                        className={`px-4 py-2 rounded-full text-sm font-semibold transition-colors border ${activeExtra === 'roots' ? 'bg-primary text-white border-primary' : 'bg-white text-gray-600 border-gray-200 hover:border-primary hover:text-primary'}`}
-                                    >
-                                        Etymology & Roots
+                                        <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4" />
+                                        </svg>
+                                        Show all
                                     </button>
                                 </div>
 
-                                {/* Loading Indicator */}
-                                {loadingExtras && (
-                                    <div className="mt-4 flex justify-center">
-                                        <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-primary"></div>
-                                    </div>
-                                )}
-
-                                {/* Display Content */}
-                                {currentWord.extras && activeExtra && !loadingExtras && (
-                                    <div className="mt-4 p-4 bg-gray-50 rounded-xl text-left border border-gray-200 animate-fade-in max-w-lg mx-auto">
-                                        {activeExtra === 'synonyms' && (
-                                            <div>
-                                                <h4 className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-2">Synonyms</h4>
-                                                <div className="flex flex-wrap gap-2">
-                                                    {currentWord.extras.synonyms.map((s, i) => (
-                                                        <span key={i} className="px-2 py-1 bg-white border border-gray-200 rounded text-gray-700 text-sm font-medium">{s}</span>
-                                                    ))}
-                                                </div>
-                                            </div>
-                                        )}
-                                        {activeExtra === 'antonyms' && (
-                                            <div>
-                                                <h4 className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-2">Antonyms</h4>
-                                                {currentWord.extras.antonyms.length > 0 ? (
-                                                    <div className="flex flex-wrap gap-2">
-                                                        {currentWord.extras.antonyms.map((s, i) => (
-                                                            <span key={i} className="px-2 py-1 bg-white border border-gray-200 rounded text-gray-700 text-sm font-medium">{s}</span>
-                                                        ))}
-                                                    </div>
-                                                ) : <p className="text-gray-500 text-sm">None available.</p>}
-                                            </div>
-                                        )}
-                                        {activeExtra === 'roots' && (
-                                            <div>
-                                                <h4 className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-3">Etymology & Word Association</h4>
-                                                <div className="space-y-3">
-                                                    {currentWord.extras.roots.map((r, i) => (
-                                                        <div key={i} className="bg-white p-3 rounded-lg border border-gray-100">
-                                                            <div className="flex items-center gap-2 mb-1">
-                                                                <span className="font-bold text-primary font-mono">{r.root}</span>
-                                                                <span className="text-gray-400 text-xs">Meaning:</span>
-                                                                <span className="font-medium text-gray-800">{r.meaning}</span>
-                                                            </div>
-                                                            <div className="text-xs text-gray-600">
-                                                                <span className="italic mr-2">Related words:</span>
-                                                                {r.relatedWords.join(', ')}
-                                                            </div>
-                                                        </div>
-                                                    ))}
-                                                </div>
-                                            </div>
+                                {activeTab && (
+                                    <div className="w-full bg-white p-6 rounded-b-xl rounded-tr-xl shadow-lg border border-gray-200 animate-fade-in text-left h-[300px] overflow-y-auto scroll-smooth">
+                                        {activeTab === 'synonyms' ? (
+                                            <div className="flex flex-col gap-2">{renderSynonyms(currentWord.extras)}</div>
+                                        ) : activeTab === 'antonyms' ? (
+                                            <div className="flex flex-col gap-2">{renderAntonyms(currentWord.extras)}</div>
+                                        ) : (
+                                            <div className="space-y-4">{renderRoots(currentWord.extras)}</div>
                                         )}
                                     </div>
                                 )}
@@ -942,12 +930,11 @@ export const WordLearning: React.FC<WordLearningProps> = ({ words, onComplete, t
               </div>
             </div>
             
-            {/* Page Number Indicator */}
             <div className="absolute bottom-4 right-6 text-gray-300 font-mono font-bold text-xl select-none">
                {currentIndex + 1} / {localWords.length}
             </div>
 
-            {/* Definition Section - HIDDEN when in Copy Sentence or Make Sentence step to avoid clutter/duplication */}
+            {/* Definition Section - Only shown in Learn and Drill steps */}
             {(step === 'learn' || step === 'write_word') && (
               <div className="mb-8 p-6 bg-gray-50 rounded-xl">
                 <p className="text-xl text-gray-800 font-medium">{currentWord.definition}</p>
@@ -956,20 +943,12 @@ export const WordLearning: React.FC<WordLearningProps> = ({ words, onComplete, t
               </div>
             )}
 
-            {/* Interaction Area */}
             <div className="space-y-6">
-              
-              {/* Step 1: Learn */}
               {step === 'learn' && (
                 <div className="text-center space-y-6">
-                  
-                  {/* Recording Section */}
                   <div className="bg-white p-6 rounded-2xl border border-gray-100 shadow-sm">
                       <h3 className="text-gray-500 font-bold text-xs uppercase tracking-wider mb-4">Speaking Practice</h3>
-                      
                       <BigRecordButton targetText={currentWord.word} />
-
-                      {/* Result Display for Learn Step */}
                       {pronunciationResult && (
                            <div className={`mt-6 text-left p-5 rounded-xl border-l-4 ${pronunciationResult.score >= 80 ? 'bg-green-50 border-green-500' : 'bg-orange-50 border-orange-400'} animate-fade-in shadow-sm`}>
                                 <div className="flex items-center justify-between mb-3">
@@ -987,9 +966,7 @@ export const WordLearning: React.FC<WordLearningProps> = ({ words, onComplete, t
                            </div>
                       )}
                   </div>
-
                   <div className="h-px bg-gray-100 w-full my-6"></div>
-
                   <p className="text-sm text-gray-400">
                     Tip: Click between letters to split syllables. Click a letter to mark stress.
                   </p>
@@ -1005,7 +982,6 @@ export const WordLearning: React.FC<WordLearningProps> = ({ words, onComplete, t
                 </div>
               )}
 
-              {/* Step 2: Write Word 3 Times */}
               {step === 'write_word' && (
                 <div>
                     <p className="mb-2 text-gray-600">
@@ -1040,7 +1016,6 @@ export const WordLearning: React.FC<WordLearningProps> = ({ words, onComplete, t
                             ))}
                         </div>
                     </form>
-                    {/* Local Pronunciation Feedback for Step 2 if user uses the word record button */}
                     {pronunciationResult && (
                         <div className={`mt-4 p-4 rounded-xl border ${pronunciationResult.score >= 80 ? 'bg-green-50 border-green-200' : 'bg-orange-50 border-orange-200'} animate-fade-in max-w-md mx-auto`}>
                             <div className="flex items-center justify-between mb-2">
@@ -1056,7 +1031,6 @@ export const WordLearning: React.FC<WordLearningProps> = ({ words, onComplete, t
                 </div>
               )}
 
-              {/* Step 3: Copy Sentence */}
               {step === 'copy_sentence' && (
                 <div>
                     <div className="mb-6 bg-white p-6 rounded-2xl border border-gray-100 shadow-sm">
@@ -1075,12 +1049,10 @@ export const WordLearning: React.FC<WordLearningProps> = ({ words, onComplete, t
                         </div>
                         <TranslationReveal text={currentWord.exampleTranslation} className="mb-6" />
                          
-                         {/* Big Record Button for Sentence */}
                          <div className="mb-4">
                              <BigRecordButton targetText={currentWord.exampleSentence} />
                          </div>
 
-                         {/* Pronunciation Feedback (for sentence) BELOW the button/sentence */}
                          {pronunciationResult && (
                             <div className={`mt-4 text-left p-5 rounded-xl border-l-4 ${pronunciationResult.score >= 80 ? 'bg-green-50 border-green-500' : 'bg-orange-50 border-orange-400'} animate-fade-in shadow-sm`}>
                                 <div className="flex items-center justify-between mb-3">
@@ -1099,7 +1071,6 @@ export const WordLearning: React.FC<WordLearningProps> = ({ words, onComplete, t
                                 )}
                             </div>
                         )}
-
                     </div>
                     <p className="mb-2 text-gray-600">Type the example sentence above:</p>
                     <form onSubmit={handleCopySentenceSubmit}>
@@ -1124,7 +1095,6 @@ export const WordLearning: React.FC<WordLearningProps> = ({ words, onComplete, t
                 </div>
               )}
 
-              {/* Step 4: Make Sentence */}
               {step === 'make_sentence' && (
                 <div className="animate-fade-in">
                     <p className="mb-2 text-gray-600 font-medium">Create your own sentence using <span className="font-bold text-primary">"{currentWord.word}"</span>:</p>
@@ -1148,7 +1118,6 @@ export const WordLearning: React.FC<WordLearningProps> = ({ words, onComplete, t
 
                     {feedback && (
                         <div className={`mt-4 p-4 rounded-lg border ${feedback.isCorrect ? 'bg-green-50 border-green-200' : 'bg-red-50 border-red-200'}`}>
-                            {/* ... Feedback display ... */}
                             <div className="flex items-center gap-2 mb-2">
                                 {feedback.isCorrect ? (
                                     <span className="text-green-600 font-bold flex items-center">
@@ -1163,7 +1132,6 @@ export const WordLearning: React.FC<WordLearningProps> = ({ words, onComplete, t
                                 )}
                             </div>
                             
-                            {/* Explanation with text formatting */}
                             <div className="text-gray-700 mb-2 whitespace-pre-wrap leading-relaxed text-sm">
                                 {formatText(feedback.explanation)}
                             </div>
@@ -1183,11 +1151,9 @@ export const WordLearning: React.FC<WordLearningProps> = ({ words, onComplete, t
                                                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.536 8.464a5 5 0 010 7.072m2.828-9.9a9 9 0 010 12.728M5.586 15H4a1 1 0 01-1-1v-4a1 1 0 011-1h1.586l4.707-4.707C10.923 3.663 12 4.109 12 5v14c0 .891-1.077 1.337-1.707.707L5.586 15z" />
                                                 </svg>
                                             </button>
-                                            {/* Reuse Small Button for correction quick check */}
                                             <SmallRecordButton targetText={feedback.correctedSentence!} />
                                         </div>
                                     </div>
-                                    {/* Pronunciation Feedback for Corrected Sentence */}
                                      {pronunciationResult && (
                                         <div className={`mt-2 p-3 rounded-lg border ${pronunciationResult.score >= 80 ? 'bg-green-50 border-green-200' : 'bg-orange-50 border-orange-200'} animate-fade-in`}>
                                             <div className="flex items-center justify-between mb-1">
@@ -1203,10 +1169,7 @@ export const WordLearning: React.FC<WordLearningProps> = ({ words, onComplete, t
                                 </div>
                             )}
 
-                            {/* Q&A Section */}
                             <div className="mt-6 pt-6 border-t border-gray-200/60">
-                                
-                                {/* History Display */}
                                 {chatHistory.length > 0 && (
                                     <div className="space-y-4 mb-4">
                                         {chatHistory.map((msg, idx) => {
@@ -1250,7 +1213,6 @@ export const WordLearning: React.FC<WordLearningProps> = ({ words, onComplete, t
                                     </div>
                                 )}
 
-                                {/* Input Area */}
                                 <form onSubmit={handleAskSubmit} className="relative">
                                     <input 
                                         type="text" 
@@ -1270,7 +1232,6 @@ export const WordLearning: React.FC<WordLearningProps> = ({ words, onComplete, t
                                 </form>
                             </div>
                             
-                            {/* Action Buttons */}
                             <div className="flex flex-col sm:flex-row gap-3 mt-6 pt-4 border-t border-gray-200/60">
                                 <button 
                                     onClick={handleRetrySentence}
@@ -1285,7 +1246,6 @@ export const WordLearning: React.FC<WordLearningProps> = ({ words, onComplete, t
                                     {currentIndex < localWords.length - 1 ? 'Next Word' : 'Finish Vocabulary'}
                                 </button>
                             </div>
-
                         </div>
                     )}
                 </div>

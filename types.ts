@@ -27,17 +27,26 @@ export interface MistakeItem {
   correction?: string; // Correct spelling or corrected sentence
   explanation?: string; // For grammar errors
   context?: string; // Definition or Chinese translation context
+  translation?: string; // Word translation
+}
+
+export interface WordItem {
+  word: string;
+  cn: string;
 }
 
 export interface RootAssociation {
   root: string;
   meaning: string;
-  relatedWords: string[];
+  relatedWords: {
+    word: string;
+    definition: string;
+  }[];
 }
 
 export interface WordExtras {
-  synonyms: string[];
-  antonyms: string[];
+  synonyms: WordItem[];
+  antonyms: WordItem[];
   roots: RootAssociation[];
 }
 
